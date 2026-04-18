@@ -102,6 +102,8 @@ The Zig `File.buildIndex()` performs a forward-only sequential scan, recording b
 - The optimized random-access metadata inside index blocks is ignored
 - Some SIE files that rely on index-block metadata for block-to-group mapping may not index correctly
 
+**userinput** this is important to implement. test files are small but in practice sie files can get very large. and accessing data in parts and at random becomes necissary.
+
 #### 2. Backward Index Building Not Implemented
 
 **C function**: `build_index()` in `file.c` — scans backward from EOF using index blocks
@@ -110,6 +112,8 @@ The Zig `File.buildIndex()` performs a forward-only sequential scan, recording b
 The C library starts at the end of the file and works backward, reading index blocks first to quickly build the complete index without scanning every block. The Zig version scans forward through every block from the beginning.
 
 **Impact**: Performance regression on large SIE files. Functionally correct for well-formed files, but may fail to properly handle files where blocks are out of order or where the forward scan encounters invalid data it could have avoided by starting from the validated end.
+
+**userinput** important to implement for similar reasons to 1. large files are expected, performance optimizations are needed. sie files can also be appended to after creation, which is why non 'well formed' files may be possible.
 
 #### 3. CAN Raw File Parsing Not Working
 
@@ -123,6 +127,8 @@ The regression test file `can_raw_test-v-1-5-0-129-build-1218.sie` cannot be par
 
 **Impact**: CAN raw SIE files cannot be read.
 
+**userinput** This NEEDS to be implemented. parsing raw can data is a core feature of this library and is required. please fully implement along with proper testing.
+
 ### MAJOR
 
 #### 4. File Stream Writing Not Implemented
@@ -134,12 +140,16 @@ The C library supports writing SIE data to files via a `sie_File_Stream` type th
 
 **Impact**: Cannot create or modify SIE files via the file stream interface. The `Writer` can format blocks, but there's no integrated file-backed write pipeline. Users would need to manually connect `Writer` output to a file handle.
 
+**userinput** this should be implemented as full feature parity with the original library is the goal, and the original library supports writing sie files.
+
 #### 5. `group_foreach` Not Implemented
 
 **C function**: `sie_file_group_foreach()` — iterate over all groups with callback
 **Zig status**: Missing (manual iteration over `group_indexes` HashMap required)
 
 **Impact**: Low — users can iterate `group_indexes` directly, but it's a convenience gap.
+
+**userinput** this should be implemented for feature parity with original library.
 
 ### MINOR
 
@@ -158,12 +168,16 @@ The following XML utility functions from the C library are not present in the Zi
 
 **Impact**: Low — these are convenience functions. `findElement()` covers most search use cases, and attribute comparison can be done manually. `set_attributes` could matter if XML merge relies on it internally.
 
+**userinput** These should be implemented for feature parity with original library.
+
 #### 7. Tag Spigot Not Ported
 
 **C functions**: `sie_tag_spigot_new()`, `sie_tag_spigot_init()`, `sie_tag_spigot_destroy()`, `sie_tag_spigot_get_inner()`, `sie_tag_spigot_clear_output()`
 **Zig status**: Not implemented — tag data accessed directly via `Tag.getBinary()` / `Tag.getString()`
 
 **Impact**: Low — Zig provides direct slice access to tag data, which is simpler and sufficient for typical use cases. The spigot abstraction was a C design pattern for uniform streaming; Zig's slice-based approach is more idiomatic.
+
+**userinput** not entirely sure if this is a problem. the original documentation mentions that there is no arbitrary limit to tag size, and sometimes tags can be very large. if zig slicing handles very large tags this is okay, if not these functions will need to be implemented.
 
 #### 8. Lazy XML/Dimension Expansion Missing
 
@@ -172,12 +186,16 @@ The following XML utility functions from the C library are not present in the Zi
 
 **Impact**: Low — slightly higher memory usage at open time, but simpler code and no risk of lazy-init bugs.
 
+**userinput** Technically the binary blocks in the file are contained in the xml structure. these can become very large (multiple gigabytes). if this could cause problems with the eager approach then the lazy approach will need to be implemented. alternatively in my own implementation i inserted the closing tag </sie> before the binary blocks before parsing. this was accomplished through the index blocks. decide what is the best approach here and implement.
+
 #### 9. `dump()` Debug Methods Not Ported
 
 **C functions**: `sie_channel_dump()`, `sie_test_dump()`, `sie_dimension_dump()`, `sie_tag_dump()`
 **Zig status**: Some types implement `format()` for `std.fmt.Formatter` integration, but not all C dump methods have equivalents
 
 **Impact**: Negligible — debug output. Zig's `std.fmt` integration is arguably better.
+
+**userinput** this is okay. std.fmt is nicer, this can be ignored.
 
 ---
 
