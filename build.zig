@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
 
     // Example/demo build step
-    const example_step = b.step("example", "Build sie_dump example");
+    const example_step = b.step("example", "Build examples");
 
     // Shared library build step
     const lib_step = b.step("lib", "Build shared library");
@@ -33,6 +33,20 @@ pub fn build(b: *std.Build) void {
     });
     const install_example = b.addInstallArtifact(sie_dump, .{});
     example_step.dependOn(&install_example.step);
+
+    // Build sie_export example
+    const sie_export = b.addExecutable(.{
+        .name = "sie_export",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/sie_export.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "libsie", .module = libsie_mod },
+            },
+        }),
+    });
+    const install_export = b.addInstallArtifact(sie_export, .{});
+    example_step.dependOn(&install_export.step);
 
     // Build shared library
     const shared_lib = b.addLibrary(.{
