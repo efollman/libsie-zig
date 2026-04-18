@@ -164,7 +164,7 @@ test "file: backward index with writer-generated index blocks" {
     writer.deinit();
 
     // Write to temp file
-    const tmp_path = "/tmp/libsie_test_index_roundtrip.sie";
+    const tmp_path = ".zig-cache/libsie_test_index_roundtrip.sie";
     {
         var tmp = try std.fs.cwd().createFile(tmp_path, .{});
         defer tmp.close();
@@ -274,7 +274,7 @@ test "file: unindexed blocks tracking" {
 
     writer.deinit();
 
-    const tmp_path = "/tmp/libsie_test_unindexed.sie";
+    const tmp_path = ".zig-cache/libsie_test_unindexed.sie";
     {
         var tmp = try std.fs.cwd().createFile(tmp_path, .{});
         defer tmp.close();
