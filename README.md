@@ -1,5 +1,7 @@
 # LibSIE - Zig Port
 
+[![CI](https://github.com/efollman/libsie-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/efollman/libsie-zig/actions/workflows/ci.yml)
+
 A complete rewrite of [libsie](https://github.com/efollman/libsie-reference) (SIE file reader library) in pure Zig, with zero external dependencies. The original C library is also available from the [HBM/SoMat download archive](https://www.hbm.com/tw/2082/somat-download-archive/).
 
 **Author:** Evan Follman | **322 tests passing** | Zig 0.15.x | Zero dependencies
@@ -32,9 +34,10 @@ recommended for production use. Bug reports and contributions are welcome.
 # Run all tests
 zig build test --summary all
 
-# Build sie_dump demo
+# Build examples
 zig build example
 ./zig-out/bin/sie_dump <file.sie>
+./zig-out/bin/sie_export <input.sie> <output.txt>
 ```
 
 ### Using as a library
@@ -77,6 +80,7 @@ test/                   Integration tests (21 files, 172 tests)
   data/                 Test SIE files and decoder fixtures
 examples/
   sie_dump.zig          SIE file dumper demo (verbose tutorial)
+  sie_export.zig        SIE-to-ASCII exporter (metadata + channel data)
 docs/
   SIE_FORMAT.md         The SIE file format specification
   CORE_SCHEMA.md        The core metadata schema
@@ -153,6 +157,7 @@ The port maintains the original libsie module structure using Zig idioms:
 | [zig-details.md](docs/zig-details.md) | Implementation details, history, C→Zig differences, test coverage, audit |
 | [apilist.md](docs/apilist.md) | Complete public API function listing |
 | [examples/sie_dump.zig](examples/sie_dump.zig) | Verbose tutorial demo (Zig port of libsie-demo.c) |
+| [examples/sie_export.zig](examples/sie_export.zig) | SIE-to-ASCII file exporter |
 
 Format/schema docs are ported from the original C library LaTeX sources ([available on GitHub](https://github.com/efollman/libsie-reference) or from the [HBM/SoMat download archive](https://www.hbm.com/tw/2082/somat-download-archive/)). Original content is preserved verbatim where applicable; Zig implementation differences are called out in clearly marked blocks.
 
