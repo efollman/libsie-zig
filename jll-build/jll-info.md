@@ -141,7 +141,7 @@ git -C /tmp/libsie-z.git rev-list -n 1 v0.2.0
 LIBSIE_VERSION=0.2.0 \
 LIBSIE_TREE_HASH=<hash from above> \
 julia --project=. build_tarballs.jl --verbose \
-    --deploy="JuliaBinaryWrappers/libsie_jll.jl"
+    --deploy="efollman/libsie_jll.jl"
 ```
 
 This will:

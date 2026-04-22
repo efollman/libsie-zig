@@ -19,14 +19,14 @@
 using BinaryBuilder, Pkg
 
 name    = "libsie"
-version = VersionNumber(get(ENV, "LIBSIE_VERSION", "0.2.0"))
+version = VersionNumber(get(ENV, "LIBSIE_VERSION", "0.3.0"))
 
 # ── Sources ────────────────────────────────────────────────────────────────
 # Production: pull a tagged tarball from GitHub. Replace `tree_hash` after
 # tagging the release upstream (BB will tell you the expected hash on first
 # run if it's wrong).
 repo      = get(ENV, "LIBSIE_REPO",      "https://github.com/efollman/libsie-z.git")
-tree_hash = get(ENV, "LIBSIE_TREE_HASH", "861699a44be2ff337d4c5c26cf40c82393ded8cf")
+tree_hash = get(ENV, "LIBSIE_TREE_HASH", "0f7e05cd1e05c24f212f0305deac9cb6b0e211be")
 
 # Zig itself: pulled in directly because Zig_jll lags far behind upstream.
 # The BB sandbox host is x86_64-linux-musl, so we fetch the matching Zig
@@ -36,18 +36,18 @@ zig_version = "0.15.2"
 zig_sha256  = "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
 zig_url     = "https://ziglang.org/download/$(zig_version)/zig-x86_64-linux-$(zig_version).tar.xz"
 
-#=
 sources = [
     GitSource(repo, tree_hash),
     ArchiveSource(zig_url, zig_sha256; unpack_target = "zig"),
 ]
-    =#
 
 # For local development, comment the GitSource block above and uncomment:
+#=
 sources = [
     DirectorySource(joinpath(@__DIR__, ".."); target = "libsie-z"),
     ArchiveSource(zig_url, zig_sha256; unpack_target = "zig"),
 ]
+=#
 
 # ── Build script ───────────────────────────────────────────────────────────
 # Runs inside the BinaryBuilder sandbox. `${target}` is the BB GNU triple,
