@@ -16,17 +16,21 @@
 # For local iteration against a working tree, point `sources` at a
 # `DirectorySource` instead — see commented block below.
 
-using BinaryBuilder, Pkg
+using Pkg
+Pkg.activate(@__DIR__)
+Pkg.instantiate()
+
+using BinaryBuilder
 
 name    = "libsie"
-version = VersionNumber(get(ENV, "LIBSIE_VERSION", "0.3.0"))
+version = VersionNumber(get(ENV, "LIBSIE_VERSION", "0.0.0"))
 
 # ── Sources ────────────────────────────────────────────────────────────────
 # Production: pull a tagged tarball from GitHub. Replace `tree_hash` after
 # tagging the release upstream (BB will tell you the expected hash on first
 # run if it's wrong).
 repo      = get(ENV, "LIBSIE_REPO",      "https://github.com/efollman/libsie-z.git")
-tree_hash = get(ENV, "LIBSIE_TREE_HASH", "0f7e05cd1e05c24f212f0305deac9cb6b0e211be")
+tree_hash = get(ENV, "LIBSIE_TREE_HASH", "0")
 
 # Zig itself: pulled in directly because Zig_jll lags far behind upstream.
 # The BB sandbox host is x86_64-linux-musl, so we fetch the matching Zig

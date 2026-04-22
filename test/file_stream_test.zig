@@ -10,7 +10,9 @@ const Writer = libsie.advanced.writer.Writer;
 
 const testing = std.testing;
 
-const tmp_path = "zig-out/test_file_stream.sie";
+// Use .zig-cache/ because it is guaranteed to exist during `zig build test`
+// (zig-out/ is only created when an artifact install step runs).
+const tmp_path = ".zig-cache/test_file_stream.sie";
 
 /// Build a raw SIE block in Writer format: [block_size_be, group_be, magic_be, payload, crc_be, block_size_be]
 fn buildRawBlock(allocator: std.mem.Allocator, group: u32, payload: []const u8) ![]u8 {

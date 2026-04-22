@@ -74,7 +74,9 @@ Output is placed in `zig-out/lib/` (or `zig-out/bin/` for the DLL on
 Windows). The shared library exports the full C ABI declared in
 [`include/sie.h`](include/sie.h) — see [C ABI / FFI](#c-abi--ffi) below.
 
-### Cross-compiling with GNU triples
+### Changes for jll packaging
+
+#### Cross-compiling with GNU triples
 
 The build script accepts `-Dtriple=<gnu-triple>` as a friendlier alternative
 to Zig's `-Dtarget=` for cross-compilation. The following 18 triples are
@@ -95,7 +97,7 @@ zig build lib -Dtriple=x86_64-linux-gnu
 zig build lib -Dtriple=x86_64-w64-mingw32
 ```
 
-### C ABI / FFI
+#### C ABI / FFI
 
 `src/c_api.zig` declares ~60 `export fn`s wrapping the public Zig API for
 use from C, Julia (`ccall`), Python (`ctypes`), Rust (`bindgen`), and any
@@ -120,7 +122,7 @@ All fallible functions return `int` (0 = `SIE_OK`, non-zero = status code
 from `src/error.zig`'s `errorToStatus`). All handles are opaque pointers;
 ownership conventions are documented per function in `sie.h`.
 
-### BinaryBuilder.jl / JLL packaging
+#### BinaryBuilder.jl / JLL packaging
 
 `zig build jll` produces the exact directory layout BinaryBuilder.jl
 expects under `${prefix}`:

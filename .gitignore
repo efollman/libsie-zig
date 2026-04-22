@@ -3,3 +3,4 @@ zig-out/
 .vscode/
 jll-build/build
 jll-build/products
+jll-build/Manifest.toml
