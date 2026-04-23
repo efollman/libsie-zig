@@ -483,6 +483,36 @@ var copy = try output.deepCopy(allocator);
 defer copy.deinit();
 ```
 
+**Bulk range copy (Zig + C):** to avoid one call per row when reading
+whole columns, use the range accessors. They `memcpy` consecutive rows
+out of the dimension buffer in one shot, clamping at `num_rows`.
+
+```zig
+// Zig
+var buf: [4096]f64 = undefined;
+const n = try output.getFloat64Range(dim, start_row, buf.len, &buf);
+// buf[0..n] now holds the rows
+
+// Raw variant fills parallel pointer + size arrays
+var ptrs: [4096][*]const u8 = undefined;
+var sizes: [4096]u32 = undefined;
+const m = try output.getRawRange(dim, start_row, ptrs.len, &ptrs, &sizes);
+```
+
+```c
+/* C — see include/sie.h */
+double buf[4096];
+size_t written = 0;
+sie_output_get_float64_range(out, dim, start_row, 4096, buf, &written);
+```
+
+This is the recommended path for bulk numeric reads from FFI consumers
+(e.g. Julia `read!` filling a preallocated `Vector{Float64}`). One ccall
+per output block instead of per sample drops boundary-crossing overhead
+by 3–4 orders of magnitude on typical channels. See
+[libsie-z-optimization-notes.md](../libsie-z-optimization-notes.md) for
+background.
+
 ---
 
 ## Error handling
@@ -668,7 +698,95 @@ their engineering-unit boundaries.
 
 ---
 
-## Complete type reference
+## C-only writer-side APIs
+
+These five subsystems are exposed primarily for C / FFI consumers.
+Zig callers can use the underlying types directly (`libsie.advanced.writer`,
+`libsie.advanced.recover`, etc.); the C ABI just glues them to opaque
+handles + a callback for byte emission.
+
+### Writer
+
+In-memory SIE block composer. The caller supplies a callback that
+receives each fully-formed block; the writer handles header/trailer/CRC
+framing, XML and group-1 block-index buffering, and ID allocation.
+
+```c
+size_t my_emit(void *user, const uint8_t *data, size_t size) {
+    fwrite(data, 1, size, (FILE*)user);
+    return size;
+}
+
+sie_Writer *w;
+sie_writer_new(my_emit, fp, &w);
+sie_writer_xml_header(w);
+uint32_t group = sie_writer_next_id(w, SIE_WRITER_ID_GROUP);
+/* ... sie_writer_xml_string(w, ...) for definitions ... */
+sie_writer_write_block(w, group, payload, payload_size);
+sie_writer_free(w);  /* flushes pending XML + index buffers */
+```
+
+Pass `callback = NULL` for a dry-run writer that only tracks offsets,
+IDs, and would-be index entries (useful with `sie_writer_total_size`
+to predict file size before committing).
+
+### FileStream
+
+Stream-to-file writer: feed raw SIE bytes incrementally, complete
+blocks land on disk and are indexed by group. Use this when you have
+a non-seekable byte source (network, pipe) and want it on disk
+without buffering the whole stream.
+
+```c
+sie_FileStream *fs;
+sie_file_stream_open("output.sie", &fs);
+size_t consumed;
+sie_file_stream_add_data(fs, chunk, chunk_len, &consumed);
+/* ... */
+sie_file_stream_close(fs);
+```
+
+### Recover
+
+3-pass corruption recovery. Returns a JSON summary of recovered parts
+and glue blocks. The buffer is owned by libsie; release it with
+`sie_string_free`.
+
+```c
+const uint8_t *json;
+size_t json_len;
+if (sie_recover("damaged.sie", 0, &json, &json_len) == SIE_OK) {
+    fwrite(json, 1, json_len, stdout);
+    sie_string_free(json, json_len);
+}
+```
+
+### PlotCrusher
+
+Reduces a high-rate `Output` stream to ~`ideal_scans` points for
+plotting. Feed input chunks via `sie_plot_crusher_work` until it
+reports done, then call `sie_plot_crusher_finalize` and read the
+result (a borrowed `sie_Output*`).
+
+### Sifter
+
+Extract a subset of channels from one SIE file into a new (smaller)
+SIE file. Borrows a `Writer` for the output and rewrites all
+internal IDs (groups, decoders, tests, channels) so the result is
+self-consistent.
+
+```c
+sie_Writer *w;       sie_writer_new(my_emit, fp, &w);
+sie_Sifter *s;       sie_sifter_new(w, &s);
+sie_sifter_add_channel(s, src_file, ch, /*start*/0, /*end*/UINT64_MAX);
+sie_sifter_finish(s, src_file);  /* writes XML + copies data blocks */
+sie_sifter_free(s);
+sie_writer_free(w);
+```
+
+---
+
+
 
 For the full list of all 462 public functions across 36 modules, see the
 **Public API** section in [README_ZIG.md](../README_ZIG.md).

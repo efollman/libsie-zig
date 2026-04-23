@@ -248,6 +248,61 @@ pub const Output = struct {
         return null;
     }
 
+    /// Bulk-copy `count` consecutive Float64 rows of `dim`, starting at
+    /// `start_row`, into `out_buf`. Returns the number of rows actually
+    /// written (clamped to the available row count). Out-of-bounds dim or
+    /// wrong dim_type returns `error.IndexOutOfBounds`.
+    pub fn getFloat64Range(
+        self: *const Output,
+        dim: usize,
+        start_row: usize,
+        count: usize,
+        out_buf: []f64,
+    ) !usize {
+        if (dim >= self.num_dims) return error.IndexOutOfBounds;
+        const d = &self.dimensions[dim];
+        if (d.dim_type != .Float64) return error.IndexOutOfBounds;
+        const data = d.float64_data orelse return 0;
+        if (start_row >= self.num_rows) return 0;
+        const available = self.num_rows - start_row;
+        const n = @min(@min(count, available), out_buf.len);
+        if (n == 0) return 0;
+        const end = start_row + n;
+        if (end > data.len) return error.IndexOutOfBounds;
+        @memcpy(out_buf[0..n], data[start_row..end]);
+        return n;
+    }
+
+    /// Bulk-fetch `count` consecutive Raw rows of `dim`, starting at
+    /// `start_row`. Fills parallel arrays `out_ptrs`/`out_sizes` with the
+    /// borrowed pointer + length of each row's payload. Returns the number
+    /// of rows actually written. Pointers remain valid until the next
+    /// spigot advance or until the Output is freed.
+    pub fn getRawRange(
+        self: *const Output,
+        dim: usize,
+        start_row: usize,
+        count: usize,
+        out_ptrs: [][*]const u8,
+        out_sizes: []u32,
+    ) !usize {
+        if (dim >= self.num_dims) return error.IndexOutOfBounds;
+        const d = &self.dimensions[dim];
+        if (d.dim_type != .Raw) return error.IndexOutOfBounds;
+        const data = d.raw_data orelse return 0;
+        if (start_row >= self.num_rows) return 0;
+        const available = self.num_rows - start_row;
+        const n = @min(@min(@min(count, available), out_ptrs.len), out_sizes.len);
+        if (n == 0) return 0;
+        if (start_row + n > data.len) return error.IndexOutOfBounds;
+        for (0..n) |i| {
+            const r = data[start_row + i];
+            out_ptrs[i] = r.ptr.ptr;
+            out_sizes[i] = r.size;
+        }
+        return n;
+    }
+
     /// Get dimension type
     pub fn dimensionType(self: *const Output, dim: usize) ?OutputType {
         if (dim >= self.num_dims) return null;
@@ -477,4 +532,69 @@ test "output clear and shrink" {
     output.clearAndShrink();
     try std.testing.expectEqual(@as(usize, 0), output.dimensions[0].guts.capacity);
     try std.testing.expect(output.dimensions[0].float64_data == null);
+}
+
+test "output getFloat64Range bulk copy" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var output = try Output.init(allocator, 1);
+    defer output.deinit();
+
+    output.setType(0, .Float64);
+    try output.resize(0, 16);
+    output.num_rows = 10;
+    for (0..10) |i| output.dimensions[0].float64_data.?[i] = @floatFromInt(i * 2);
+
+    var buf: [10]f64 = undefined;
+    // Full range
+    try std.testing.expectEqual(@as(usize, 10), try output.getFloat64Range(0, 0, 10, &buf));
+    for (0..10) |i| try std.testing.expectEqual(@as(f64, @floatFromInt(i * 2)), buf[i]);
+
+    // Partial slice from middle
+    var buf2: [4]f64 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), try output.getFloat64Range(0, 3, 4, &buf2));
+    try std.testing.expectEqual(@as(f64, 6.0), buf2[0]);
+    try std.testing.expectEqual(@as(f64, 12.0), buf2[3]);
+
+    // Clamped at end
+    var buf3: [8]f64 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try output.getFloat64Range(0, 7, 8, &buf3));
+    try std.testing.expectEqual(@as(f64, 14.0), buf3[0]);
+    try std.testing.expectEqual(@as(f64, 18.0), buf3[2]);
+
+    // Past end → 0
+    try std.testing.expectEqual(@as(usize, 0), try output.getFloat64Range(0, 100, 4, &buf3));
+
+    // Wrong dim type / OOB dim
+    try std.testing.expectError(error.IndexOutOfBounds, output.getFloat64Range(99, 0, 1, &buf3));
+}
+
+test "output getRawRange bulk fetch" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var output = try Output.init(allocator, 1);
+    defer output.deinit();
+
+    output.setType(0, .Raw);
+    try output.resize(0, 4);
+    output.num_rows = 3;
+    try output.setRaw(0, 0, "alpha");
+    try output.setRaw(0, 1, "beta");
+    try output.setRaw(0, 2, "gamma");
+
+    var ptrs: [3][*]const u8 = undefined;
+    var sizes: [3]u32 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), try output.getRawRange(0, 0, 3, &ptrs, &sizes));
+    try std.testing.expectEqualStrings("alpha", ptrs[0][0..sizes[0]]);
+    try std.testing.expectEqualStrings("beta", ptrs[1][0..sizes[1]]);
+    try std.testing.expectEqualStrings("gamma", ptrs[2][0..sizes[2]]);
+
+    // Partial from row 1
+    try std.testing.expectEqual(@as(usize, 2), try output.getRawRange(0, 1, 5, &ptrs, &sizes));
+    try std.testing.expectEqualStrings("beta", ptrs[0][0..sizes[0]]);
+    try std.testing.expectEqualStrings("gamma", ptrs[1][0..sizes[1]]);
 }

@@ -33,8 +33,17 @@ const Test = root.Test;
 const Tag = root.Tag;
 const Dimension = root.Dimension;
 const Stream = root.Stream;
+const FileStream = root.FileStream;
+const File = root.File;
 const histogram_mod = @import("histogram.zig");
 const Histogram = histogram_mod.Histogram;
+const writer_mod = @import("writer.zig");
+const Writer = writer_mod.Writer;
+const recover_mod = @import("recover.zig");
+const plot_crusher_mod = @import("plot_crusher.zig");
+const PlotCrusher = plot_crusher_mod.PlotCrusher;
+const sifter_mod = @import("sifter.zig");
+const Sifter = sifter_mod.Sifter;
 
 // One global allocator for everything created via the C API. Using the C
 // allocator keeps interop simple and predictable for FFI consumers.
@@ -432,6 +441,13 @@ export fn sie_spigot_set_scan_limit(handle: ?*anyopaque, limit: u64) void {
     spig.setScanLimit(limit);
 }
 
+/// Drop the spigot's current Output buffer (releases its memory).
+/// Subsequent `sie_spigot_get` calls will allocate a fresh one.
+export fn sie_spigot_clear_output(handle: ?*anyopaque) void {
+    const spig = castSpigot(handle) orelse return;
+    spig.clearOutput();
+}
+
 /// Find first scan in `dim` with value >= `value`.
 /// On success writes block/scan and returns SIE_OK; if no such scan
 /// exists writes 0/0 and returns SIE_OK with `*out_found` = 0.
@@ -529,6 +545,59 @@ export fn sie_output_get_raw(
     const r = out.raw(dim, row) orelse return statusOf(error.IndexOutOfBounds);
     out_ptr.* = r.ptr.ptr;
     out_size.* = r.size;
+    return SIE_OK;
+}
+
+/// Bulk-copy `count` consecutive Float64 rows of dimension `dim` from
+/// the output, starting at `start_row`, into `out_buf`. The caller must
+/// ensure `out_buf` has room for `count` doubles. The number of rows
+/// actually written (clamped to the output's row count) is stored in
+/// `*out_written`.
+///
+/// One ccall replaces `count` calls to `sie_output_get_float64`, which
+/// is the hot path for bulk numeric reads.
+export fn sie_output_get_float64_range(
+    handle: ?*anyopaque,
+    dim: usize,
+    start_row: usize,
+    count: usize,
+    out_buf: [*]f64,
+    out_written: *usize,
+) c_int {
+    const out = castOutput(handle) orelse return statusOf(error.InvalidData);
+    const buf = out_buf[0..count];
+    const n = out.getFloat64Range(dim, start_row, count, buf) catch |err| {
+        out_written.* = 0;
+        return statusOf(err);
+    };
+    out_written.* = n;
+    return SIE_OK;
+}
+
+/// Bulk-fetch `count` consecutive Raw rows of dimension `dim` from the
+/// output, starting at `start_row`. Fills the parallel arrays
+/// `out_ptrs` (length `count`) and `out_sizes` (length `count`) with
+/// borrowed pointer + length for each row's payload. The number of rows
+/// actually written is stored in `*out_written`. Borrowed pointers
+/// remain valid until the next `sie_spigot_get` call on the owning
+/// spigot.
+export fn sie_output_get_raw_range(
+    handle: ?*anyopaque,
+    dim: usize,
+    start_row: usize,
+    count: usize,
+    out_ptrs: [*][*]const u8,
+    out_sizes: [*]u32,
+    out_written: *usize,
+) c_int {
+    const out = castOutput(handle) orelse return statusOf(error.InvalidData);
+    const ptrs = out_ptrs[0..count];
+    const sizes = out_sizes[0..count];
+    const n = out.getRawRange(dim, start_row, count, ptrs, sizes) catch |err| {
+        out_written.* = 0;
+        return statusOf(err);
+    };
+    out_written.* = n;
     return SIE_OK;
 }
 
@@ -655,6 +724,328 @@ export fn sie_histogram_get_bounds(
     return SIE_OK;
 }
 
+// ── Writer ──────────────────────────────────────────────────────────────────
+// Low-level SIE block writer. The caller supplies a C callback that receives
+// each fully-formed block (header + payload + trailer); the writer is purely
+// an in-memory composer.
+
+/// C-ABI signature for the writer callback. Must return the number of bytes
+/// consumed; if it differs from `size`, the writer returns SIE_E_FILE_WRITE
+/// from the call that triggered the flush.
+pub const sie_writer_fn = *const fn (user: ?*anyopaque, data: [*]const u8, size: usize) callconv(.c) usize;
+
+/// Internal box: stores a Writer plus the C callback + user pointer it
+/// trampolines through. The Writer holds a Zig fn pointer that calls the
+/// box's C callback.
+const WriterBox = struct {
+    writer: Writer,
+    c_fn: ?sie_writer_fn,
+    c_user: ?*anyopaque,
+};
+
+fn writerTrampoline(user: ?*anyopaque, data: []const u8) usize {
+    const box: *WriterBox = @ptrCast(@alignCast(user.?));
+    const cb = box.c_fn orelse return data.len;
+    return cb(box.c_user, data.ptr, data.len);
+}
+
+/// Writer ID-class constants matching `writer_mod.IdType`.
+pub const SIE_WRITER_ID_GROUP: c_int = 0;
+pub const SIE_WRITER_ID_TEST: c_int = 1;
+pub const SIE_WRITER_ID_CHANNEL: c_int = 2;
+pub const SIE_WRITER_ID_DECODER: c_int = 3;
+
+/// Create a new Writer. `callback` may be NULL for a "dry-run" writer that
+/// only tracks offsets / IDs / index entries.
+export fn sie_writer_new(
+    callback: ?sie_writer_fn,
+    user: ?*anyopaque,
+    out_handle: *?*anyopaque,
+) c_int {
+    const box = c_allocator.create(WriterBox) catch return statusOf(error.OutOfMemory);
+    box.* = .{
+        .writer = undefined,
+        .c_fn = callback,
+        .c_user = user,
+    };
+    box.writer = Writer.init(c_allocator, writerTrampoline, @ptrCast(box));
+    out_handle.* = @ptrCast(box);
+    return SIE_OK;
+}
+
+/// Free a Writer. Flushes any pending XML/index buffers first.
+export fn sie_writer_free(handle: ?*anyopaque) void {
+    const box = castWriter(handle) orelse return;
+    box.writer.deinit();
+    c_allocator.destroy(box);
+}
+
+/// Write one complete SIE block (header + payload + trailer) for `group`.
+export fn sie_writer_write_block(
+    handle: ?*anyopaque,
+    group: u32,
+    data: [*]const u8,
+    size: usize,
+) c_int {
+    const box = castWriter(handle) orelse return statusOf(error.InvalidData);
+    box.writer.writeBlock(group, data[0..size]) catch |err| return statusOf(err);
+    return SIE_OK;
+}
+
+/// Append raw bytes to the pending XML buffer (auto-flushes when large).
+export fn sie_writer_xml_string(
+    handle: ?*anyopaque,
+    data: [*]const u8,
+    size: usize,
+) c_int {
+    const box = castWriter(handle) orelse return statusOf(error.InvalidData);
+    box.writer.xmlString(data[0..size]) catch |err| return statusOf(err);
+    return SIE_OK;
+}
+
+/// Append the standard SIE XML preamble (root element, decoders 0/1, etc.).
+export fn sie_writer_xml_header(handle: ?*anyopaque) c_int {
+    const box = castWriter(handle) orelse return statusOf(error.InvalidData);
+    box.writer.xmlHeader() catch |err| return statusOf(err);
+    return SIE_OK;
+}
+
+/// Force-flush the pending XML buffer as a group-0 block.
+export fn sie_writer_flush_xml(handle: ?*anyopaque) void {
+    const box = castWriter(handle) orelse return;
+    box.writer.flushXml();
+}
+
+/// Force-flush the pending block-index buffer as a group-1 block.
+export fn sie_writer_flush_index(handle: ?*anyopaque) void {
+    const box = castWriter(handle) orelse return;
+    box.writer.flushIndex();
+}
+
+/// Allocate the next free ID for one of the SIE id-classes. `id_type` must
+/// be one of SIE_WRITER_ID_GROUP/TEST/CHANNEL/DECODER.
+export fn sie_writer_next_id(handle: ?*anyopaque, id_type: c_int) u32 {
+    const box = castWriter(handle) orelse return 0;
+    if (id_type < 0 or id_type > 3) return 0;
+    return box.writer.nextId(@enumFromInt(@as(u2, @intCast(id_type))));
+}
+
+/// Predict the total file size given currently-buffered state plus
+/// `addl_bytes` of payload spread across `addl_blocks` blocks.
+export fn sie_writer_total_size(
+    handle: ?*anyopaque,
+    addl_bytes: u64,
+    addl_blocks: u64,
+) u64 {
+    const box = castWriter(handle) orelse return 0;
+    return box.writer.totalSize(addl_bytes, addl_blocks);
+}
+
+/// Bytes already emitted (sum of all completed block sizes).
+export fn sie_writer_offset(handle: ?*anyopaque) u64 {
+    const box = castWriter(handle) orelse return 0;
+    return box.writer.offset;
+}
+
+/// Enable / disable automatic group-1 block-index generation.
+export fn sie_writer_set_do_index(handle: ?*anyopaque, do_index: c_int) void {
+    const box = castWriter(handle) orelse return;
+    box.writer.do_index = do_index != 0;
+}
+
+// ── FileStream ──────────────────────────────────────────────────────────────
+// Stream-to-file: feed raw SIE bytes incrementally; complete blocks are
+// written through to disk and indexed by group. Use this for the writer-side
+// flow where you have a byte stream (e.g. from a network source) and want to
+// land it in a real file without buffering everything in memory.
+
+/// Create + open a FileStream. The path is copied internally.
+export fn sie_file_stream_open(path: [*:0]const u8, out_handle: *?*anyopaque) c_int {
+    const path_slice = std.mem.span(path);
+    const path_copy = c_allocator.dupe(u8, path_slice) catch return statusOf(error.OutOfMemory);
+    errdefer c_allocator.free(path_copy);
+    const fs = c_allocator.create(FileStream) catch return statusOf(error.OutOfMemory);
+    fs.* = FileStream.init(c_allocator, path_copy);
+    fs.open() catch |err| {
+        fs.deinit();
+        c_allocator.destroy(fs);
+        c_allocator.free(path_copy);
+        return statusOf(err);
+    };
+    out_handle.* = @ptrCast(fs);
+    return SIE_OK;
+}
+
+/// Close + free a FileStream.
+export fn sie_file_stream_close(handle: ?*anyopaque) void {
+    const fs = castFileStream(handle) orelse return;
+    const path_copy = fs.path;
+    fs.deinit();
+    c_allocator.destroy(fs);
+    c_allocator.free(path_copy);
+}
+
+/// Feed bytes; complete blocks are extracted and written to disk.
+/// Returns the number of bytes consumed in `*out_consumed`.
+export fn sie_file_stream_add_data(
+    handle: ?*anyopaque,
+    data: [*]const u8,
+    size: usize,
+    out_consumed: *usize,
+) c_int {
+    const fs = castFileStream(handle) orelse return statusOf(error.InvalidData);
+    out_consumed.* = fs.addStreamData(data[0..size]) catch |err| return statusOf(err);
+    return SIE_OK;
+}
+
+export fn sie_file_stream_is_group_closed(handle: ?*anyopaque, group: u32) c_int {
+    const fs = castFileStream(handle) orelse return 0;
+    return if (fs.isGroupClosed(group)) 1 else 0;
+}
+
+export fn sie_file_stream_num_groups(handle: ?*anyopaque) u32 {
+    const fs = castFileStream(handle) orelse return 0;
+    return fs.numGroups();
+}
+
+export fn sie_file_stream_highest_group(handle: ?*anyopaque) u32 {
+    const fs = castFileStream(handle) orelse return 0;
+    return fs.highestGroup();
+}
+
+// ── Recover ─────────────────────────────────────────────────────────────────
+// Run the 3-pass corruption-recovery scan over a file and return the
+// summary as a JSON string (caller frees with `sie_string_free`).
+
+/// Run recovery on `path`. `mod` is the modulus for glue offset alignment
+/// (use 0 for "any offset"). On success writes (json_ptr, json_len) and
+/// returns SIE_OK; the caller MUST free `*out_json` with `sie_string_free`.
+export fn sie_recover(
+    path: [*:0]const u8,
+    mod: u64,
+    out_json: *?[*]const u8,
+    out_len: *usize,
+) c_int {
+    const path_slice = std.mem.span(path);
+    var result = recover_mod.recover(c_allocator, path_slice, mod) catch |err| {
+        out_json.* = null;
+        out_len.* = 0;
+        return statusOf(err);
+    };
+    defer result.deinit(c_allocator);
+    const json = result.toJson(c_allocator) catch |err| {
+        out_json.* = null;
+        out_len.* = 0;
+        return statusOf(err);
+    };
+    out_json.* = json.ptr;
+    out_len.* = json.len;
+    return SIE_OK;
+}
+
+/// Free a string buffer allocated by libsie (e.g. from `sie_recover`).
+export fn sie_string_free(ptr: ?[*]const u8, len: usize) void {
+    const p = ptr orelse return;
+    c_allocator.free(p[0..len]);
+}
+
+// ── PlotCrusher ─────────────────────────────────────────────────────────────
+// Reduce a high-rate Output stream down to ~ideal_scans points for plotting.
+
+/// Create a PlotCrusher targeting `ideal_scans` output samples.
+export fn sie_plot_crusher_new(ideal_scans: usize, out_handle: *?*anyopaque) c_int {
+    const pc = c_allocator.create(PlotCrusher) catch return statusOf(error.OutOfMemory);
+    pc.* = PlotCrusher.init(c_allocator, ideal_scans);
+    out_handle.* = @ptrCast(pc);
+    return SIE_OK;
+}
+
+export fn sie_plot_crusher_free(handle: ?*anyopaque) void {
+    const pc = castPlotCrusher(handle) orelse return;
+    pc.deinit();
+    c_allocator.destroy(pc);
+}
+
+/// Feed one input chunk to the crusher. Writes 1 to `*out_done` when the
+/// crusher has accumulated enough to emit (the caller can then call
+/// `sie_plot_crusher_finalize` and read the result).
+export fn sie_plot_crusher_work(
+    handle: ?*anyopaque,
+    input_handle: ?*anyopaque,
+    out_done: *c_int,
+) c_int {
+    const pc = castPlotCrusher(handle) orelse return statusOf(error.InvalidData);
+    const input = castOutput(input_handle) orelse return statusOf(error.InvalidData);
+    const done = pc.work(input) catch |err| return statusOf(err);
+    out_done.* = if (done) 1 else 0;
+    return SIE_OK;
+}
+
+export fn sie_plot_crusher_finalize(handle: ?*anyopaque) void {
+    const pc = castPlotCrusher(handle) orelse return;
+    pc.finalize();
+}
+
+/// Borrowed pointer to the crusher's internal Output. Valid until the next
+/// `sie_plot_crusher_work` or until the crusher is freed.
+export fn sie_plot_crusher_get_output(handle: ?*anyopaque) ?*anyopaque {
+    const pc = castPlotCrusher(handle) orelse return null;
+    const out = pc.getOutput() orelse return null;
+    return @ptrCast(@constCast(out));
+}
+
+// ── Sifter ──────────────────────────────────────────────────────────────────
+// Select a subset of channels from a SIE file and copy them through a Writer
+// into a new (smaller) SIE file. Builds the ID-remapping internally.
+
+/// Create a Sifter that emits through `writer_handle` (a Writer from
+/// `sie_writer_new`). The sifter borrows the writer; do not free the writer
+/// before the sifter is freed.
+export fn sie_sifter_new(writer_handle: ?*anyopaque, out_handle: *?*anyopaque) c_int {
+    const box = castWriter(writer_handle) orelse return statusOf(error.InvalidData);
+    const sif = c_allocator.create(Sifter) catch return statusOf(error.OutOfMemory);
+    sif.* = Sifter.init(c_allocator, &box.writer);
+    out_handle.* = @ptrCast(sif);
+    return SIE_OK;
+}
+
+export fn sie_sifter_free(handle: ?*anyopaque) void {
+    const sif = castSifter(handle) orelse return;
+    sif.deinit();
+    c_allocator.destroy(sif);
+}
+
+/// Add `channel` (from `file_handle`) to the sifted output. `start_block`/
+/// `end_block` clip the data range copied (use 0 / UINT64_MAX for "all").
+export fn sie_sifter_add_channel(
+    handle: ?*anyopaque,
+    file_handle: ?*anyopaque,
+    channel_handle: ?*anyopaque,
+    start_block: u64,
+    end_block: u64,
+) c_int {
+    const sif = castSifter(handle) orelse return statusOf(error.InvalidData);
+    const sf = castFile(file_handle) orelse return statusOf(error.InvalidData);
+    const ch = castChannel(channel_handle) orelse return statusOf(error.InvalidData);
+    sif.addChannel(sf, ch, start_block, end_block) catch |err| return statusOf(err);
+    return SIE_OK;
+}
+
+/// Flush XML and copy all mapped data blocks through the writer. After
+/// this returns, the Writer's callback has received the complete sifted
+/// SIE byte stream; the caller can free the sifter.
+export fn sie_sifter_finish(handle: ?*anyopaque, file_handle: ?*anyopaque) c_int {
+    const sif = castSifter(handle) orelse return statusOf(error.InvalidData);
+    const sf = castFile(file_handle) orelse return statusOf(error.InvalidData);
+    sif.finish(&sf.file) catch |err| return statusOf(err);
+    return SIE_OK;
+}
+
+export fn sie_sifter_total_entries(handle: ?*anyopaque) usize {
+    const sif = castSifter(handle) orelse return 0;
+    return sif.totalEntries();
+}
+
 // ── Internal: handle casting ────────────────────────────────────────────────
 
 inline fn castFile(h: ?*anyopaque) ?*SieFile {
@@ -686,4 +1077,16 @@ inline fn castStream(h: ?*anyopaque) ?*Stream {
 }
 inline fn castHistogram(h: ?*anyopaque) ?*Histogram {
     return @as(?*Histogram, @ptrCast(@alignCast(h)));
+}
+inline fn castWriter(h: ?*anyopaque) ?*WriterBox {
+    return @as(?*WriterBox, @ptrCast(@alignCast(h)));
+}
+inline fn castFileStream(h: ?*anyopaque) ?*FileStream {
+    return @as(?*FileStream, @ptrCast(@alignCast(h)));
+}
+inline fn castPlotCrusher(h: ?*anyopaque) ?*PlotCrusher {
+    return @as(?*PlotCrusher, @ptrCast(@alignCast(h)));
+}
+inline fn castSifter(h: ?*anyopaque) ?*Sifter {
+    return @as(?*Sifter, @ptrCast(@alignCast(h)));
 }

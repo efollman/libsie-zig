@@ -77,7 +77,7 @@ zig build lib -Dtriple=x86_64-w64-mingw32
 
 #### C ABI / FFI
 
-`src/c_api.zig` declares ~60 `export fn`s wrapping the public Zig API for
+`src/c_api.zig` declares ~90 `export fn`s wrapping the public Zig API for
 use from C, Julia (`ccall`), Python (`ctypes`), Rust (`bindgen`), and any
 other FFI consumer. The C header lives at [`include/sie.h`](include/sie.h)
 and is installed by the JLL packaging step (see below).
@@ -90,10 +90,22 @@ Coverage:
   embedded NULs.
 - `Spigot` — attach/free/get, plus `tell`/`seek`/`reset`/`is_done`,
   `disable_transforms`, `transform_output`, `set_scan_limit`,
-  `lower_bound`, `upper_bound`.
-- `Output` — dimension type query, `get_float64`, `get_raw`.
+  `clear_output`, `lower_bound`, `upper_bound`.
+- `Output` — dimension type query, per-row `get_float64` / `get_raw`,
+  and **bulk** `get_float64_range` / `get_raw_range` (one ccall per
+  block instead of per sample — the hot path for `Vector{Float64}`-style
+  reads from Julia).
 - `Stream` — incremental block ingest with group queries.
 - `Histogram` — build from a channel, query bins and bounds.
+- `Writer` — in-memory SIE block composer with a C-callback emitter,
+  XML/index buffering, `next_id` allocation, `total_size` prediction.
+- `FileStream` — stream-to-file writer (feed bytes, complete blocks land
+  on disk, indexed by group).
+- `Recover` — 3-pass corruption recovery returning a JSON summary
+  (paired with `sie_string_free` for the result buffer).
+- `PlotCrusher` — downsample an `Output` stream to ~N points for plotting.
+- `Sifter` — extract a subset of channels into a new SIE file through a
+  `Writer`, with automatic ID remapping.
 - `sie_version`, `sie_status_message` for library info / error decoding.
 
 All fallible functions return `int` (0 = `SIE_OK`, non-zero = status code
@@ -187,7 +199,7 @@ build.zig               Build configuration
 | `spigot` | Data pipeline (vtable dispatch, binary search, scan limits) |
 | `recover` | File recovery: magic scan, block glue, 3-pass algorithm, JSON |
 | `file_stream` | Incremental SIE stream-to-file writer with group tracking |
-| `c_api` | C ABI exports (~60 `export fn`s) wrapping the public Zig surface |
+| `c_api` | C ABI exports (~90 `export fn`s) wrapping the public Zig surface |
 
 ## Architecture
 

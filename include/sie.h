@@ -64,6 +64,21 @@ typedef struct sie_Spigot    sie_Spigot;
 typedef struct sie_Output    sie_Output;
 typedef struct sie_Stream    sie_Stream;
 typedef struct sie_Histogram sie_Histogram;
+typedef struct sie_Writer      sie_Writer;
+typedef struct sie_FileStream  sie_FileStream;
+typedef struct sie_PlotCrusher sie_PlotCrusher;
+typedef struct sie_Sifter      sie_Sifter;
+
+/* Writer ID classes (for sie_writer_next_id). */
+#define SIE_WRITER_ID_GROUP    0
+#define SIE_WRITER_ID_TEST     1
+#define SIE_WRITER_ID_CHANNEL  2
+#define SIE_WRITER_ID_DECODER  3
+
+/* Writer callback. The writer invokes this once per fully-formed block
+ * (header + payload + trailer). Must return the number of bytes consumed;
+ * any short return is treated as SIE_E_FILE_WRITE. */
+typedef size_t (*sie_writer_fn)(void *user, const uint8_t *data, size_t size);
 
 /* ── Library info ──────────────────────────────────────────────────────── */
 const char *sie_version(void);
@@ -136,6 +151,7 @@ size_t   sie_spigot_num_blocks(sie_Spigot *handle);
 void     sie_spigot_disable_transforms(sie_Spigot *handle, int disable);
 int      sie_spigot_transform_output(sie_Spigot *handle, sie_Output *output);
 void     sie_spigot_set_scan_limit(sie_Spigot *handle, uint64_t limit);
+void     sie_spigot_clear_output(sie_Spigot *handle);
 
 int      sie_spigot_lower_bound(sie_Spigot *handle, size_t dim, double value,
                                 uint64_t *out_block, uint64_t *out_scan, int *out_found);
@@ -150,6 +166,22 @@ int      sie_output_type(sie_Output *handle, size_t dim);
 int      sie_output_get_float64(sie_Output *handle, size_t dim, size_t row, double *out_value);
 int      sie_output_get_raw(sie_Output *handle, size_t dim, size_t row,
                             const uint8_t **out_ptr, uint32_t *out_size);
+
+/* Bulk variants — copy `count` consecutive rows of dim `dim` starting at
+ * `start_row`. `*out_written` receives the number of rows actually
+ * written (may be less than `count` at end of block). One call replaces
+ * `count` per-sample calls to `sie_output_get_float64` /
+ * `sie_output_get_raw`, eliminating per-sample FFI overhead for callers
+ * that read whole channels (e.g. Julia `read!`). For the raw variant
+ * the output rows' borrowed pointers remain valid until the next
+ * `sie_spigot_get` on the owning spigot. */
+int      sie_output_get_float64_range(sie_Output *handle, size_t dim,
+                                      size_t start_row, size_t count,
+                                      double *out_buf, size_t *out_written);
+int      sie_output_get_raw_range(sie_Output *handle, size_t dim,
+                                  size_t start_row, size_t count,
+                                  const uint8_t **out_ptrs, uint32_t *out_sizes,
+                                  size_t *out_written);
 
 /* ── Stream (incremental ingest) ───────────────────────────────────────── */
 int      sie_stream_new(sie_Stream **out_handle);
@@ -171,6 +203,63 @@ size_t   sie_histogram_num_bins(sie_Histogram *handle, size_t dim);
 int      sie_histogram_get_bin(sie_Histogram *handle, const size_t *indices, double *out_value);
 int      sie_histogram_get_bounds(sie_Histogram *handle, size_t dim,
                                   double *lower, double *upper, size_t capacity);
+
+/* ── Writer (low-level block writer) ───────────────────────────────────── */
+/* Compose SIE blocks in memory and emit each one through `callback`.
+ * Use `callback = NULL` for a dry-run writer that only tracks offsets,
+ * IDs, and index entries. */
+int      sie_writer_new(sie_writer_fn callback, void *user, sie_Writer **out_handle);
+void     sie_writer_free(sie_Writer *handle);
+int      sie_writer_write_block(sie_Writer *handle, uint32_t group,
+                                const uint8_t *data, size_t size);
+int      sie_writer_xml_string(sie_Writer *handle, const uint8_t *data, size_t size);
+int      sie_writer_xml_header(sie_Writer *handle);
+void     sie_writer_flush_xml(sie_Writer *handle);
+void     sie_writer_flush_index(sie_Writer *handle);
+uint32_t sie_writer_next_id(sie_Writer *handle, int id_type);
+uint64_t sie_writer_total_size(sie_Writer *handle, uint64_t addl_bytes,
+                               uint64_t addl_blocks);
+uint64_t sie_writer_offset(sie_Writer *handle);
+void     sie_writer_set_do_index(sie_Writer *handle, int do_index);
+
+/* ── FileStream (incremental write-to-file) ────────────────────────────── */
+/* Feed raw SIE bytes incrementally; complete blocks are written through
+ * to `path` and indexed by group. */
+int      sie_file_stream_open(const char *path, sie_FileStream **out_handle);
+void     sie_file_stream_close(sie_FileStream *handle);
+int      sie_file_stream_add_data(sie_FileStream *handle,
+                                  const uint8_t *data, size_t size,
+                                  size_t *out_consumed);
+int      sie_file_stream_is_group_closed(sie_FileStream *handle, uint32_t group);
+uint32_t sie_file_stream_num_groups(sie_FileStream *handle);
+uint32_t sie_file_stream_highest_group(sie_FileStream *handle);
+
+/* ── Recover ───────────────────────────────────────────────────────────── */
+/* Run 3-pass corruption recovery on `path`. `mod` is the alignment
+ * modulus for glue-offset search (0 = any). On success writes a JSON
+ * summary that the caller MUST free via `sie_string_free`. */
+int      sie_recover(const char *path, uint64_t mod,
+                     const uint8_t **out_json, size_t *out_len);
+void     sie_string_free(const uint8_t *ptr, size_t len);
+
+/* ── PlotCrusher (downsampling for plotting) ───────────────────────────── */
+int      sie_plot_crusher_new(size_t ideal_scans, sie_PlotCrusher **out_handle);
+void     sie_plot_crusher_free(sie_PlotCrusher *handle);
+int      sie_plot_crusher_work(sie_PlotCrusher *handle, sie_Output *input,
+                               int *out_done);
+void     sie_plot_crusher_finalize(sie_PlotCrusher *handle);
+/* Borrowed; valid until the next sie_plot_crusher_work or _free. */
+sie_Output *sie_plot_crusher_get_output(sie_PlotCrusher *handle);
+
+/* ── Sifter (subset extraction through a writer) ───────────────────────── */
+/* The sifter borrows the writer; do not free the writer before the sifter. */
+int      sie_sifter_new(sie_Writer *writer, sie_Sifter **out_handle);
+void     sie_sifter_free(sie_Sifter *handle);
+int      sie_sifter_add_channel(sie_Sifter *handle, sie_File *file,
+                                sie_Channel *channel,
+                                uint64_t start_block, uint64_t end_block);
+int      sie_sifter_finish(sie_Sifter *handle, sie_File *file);
+size_t   sie_sifter_total_entries(sie_Sifter *handle);
 
 #ifdef __cplusplus
 } /* extern "C" */

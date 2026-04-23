@@ -282,6 +282,8 @@
 | `Output.setRaw(dim, scan, data) !void` | Set single raw cell |
 | `Output.float64(dim, row) ?f64` | Get float64 value |
 | `Output.raw(dim, row) ?RawData` | Get raw value |
+| `Output.getFloat64Range(dim, start, count, buf) !usize` | Bulk-copy a range of float64 rows |
+| `Output.getRawRange(dim, start, count, ptrs, sizes) !usize` | Bulk-fetch a range of raw rows |
 | `Output.dimensionType(dim) ?OutputType` | Get dimension type |
 | `Output.deepCopy(allocator) !Output` | Deep clone all data |
 | `Output.compare(other) bool` | Compare equality |
@@ -435,7 +437,20 @@
 
 ### `writer` — SIE Block Writer
 
-See `writer.zig` for the full Writer API (block buffering, XML/index groups, CRC-32, auto-flush).
+| Function | Description |
+|----------|-------------|
+| `Writer.init(allocator, writer_fn, user) Writer` | Create writer with byte-emit callback |
+| `Writer.deinit()` | Flush XML/index buffers and free |
+| `Writer.writeBlock(group, data) !void` | Frame and emit one block |
+| `Writer.xmlString(data) !void` | Append raw XML; auto-flushes when large |
+| `Writer.xmlNode(node) !void` | Serialize an XML node into the buffer |
+| `Writer.xmlHeader() !void` | Emit the standard SIE XML preamble |
+| `Writer.flushXml()` | Force-flush pending XML as group-0 block |
+| `Writer.flushIndex()` | Force-flush pending index as group-1 block |
+| `Writer.nextId(id_type) u32` | Allocate next free Group/Test/Channel/Decoder ID |
+| `Writer.totalSize(addl_bytes, addl_blocks) u64` | Predict final file size |
+| `Writer.offset` (field) | Bytes already emitted |
+| `Writer.do_index` (field) | Toggle automatic group-1 indexing |
 
 ### `xml` — XML DOM and Parsing
 
@@ -488,3 +503,106 @@ See `writer.zig` for the full Writer API (block buffering, XML/index groups, CRC
 | `XmlDefinition.getTest(id) ?*Node` | Get test node by ID |
 | `XmlDefinition.getDecoder(id) ?*Node` | Get decoder node by ID |
 | `XmlDefinition.expand(type, id) !*Node` | Expand with base inheritance |
+
+## C ABI (`include/sie.h`)
+
+C / FFI consumers see these `sie_*` symbols. All handles are opaque
+pointers; all fallible calls return `int` (`SIE_OK` = 0, otherwise a
+`SIE_E_*` status). Strings are passed as `(ptr, len)` because tag values
+are binary-safe.
+
+### Library / status
+
+| Symbol | Purpose |
+|--------|---------|
+| `sie_version()` | Version string (NUL-terminated, static) |
+| `sie_status_message(status)` | Human-readable status string |
+
+### File / Test / Channel / Dimension / Tag
+
+`sie_file_open`, `sie_file_close`, `sie_file_num_channels`,
+`sie_file_num_tests`, `sie_file_num_tags`, `sie_file_channel`,
+`sie_file_test`, `sie_file_tag`, `sie_file_find_channel`,
+`sie_file_find_test`, `sie_file_containing_test`, `sie_test_id`,
+`sie_test_name`, `sie_test_num_channels`, `sie_test_channel`,
+`sie_test_num_tags`, `sie_test_tag`, `sie_test_find_tag`,
+`sie_channel_id`, `sie_channel_test_id`, `sie_channel_name`,
+`sie_channel_num_dims`, `sie_channel_dimension`,
+`sie_channel_num_tags`, `sie_channel_tag`, `sie_channel_find_tag`,
+`sie_dimension_index`, `sie_dimension_name`, `sie_dimension_num_tags`,
+`sie_dimension_tag`, `sie_dimension_find_tag`, `sie_tag_key`,
+`sie_tag_value`, `sie_tag_value_size`, `sie_tag_is_string`,
+`sie_tag_is_binary`, `sie_tag_group`, `sie_tag_is_from_group`.
+
+### Spigot
+
+`sie_spigot_attach`, `sie_spigot_free`, `sie_spigot_get`,
+`sie_spigot_tell`, `sie_spigot_seek`, `sie_spigot_reset`,
+`sie_spigot_is_done`, `sie_spigot_num_blocks`,
+`sie_spigot_disable_transforms`, `sie_spigot_transform_output`,
+`sie_spigot_set_scan_limit`, `sie_spigot_clear_output`,
+`sie_spigot_lower_bound`, `sie_spigot_upper_bound`.
+
+### Output (per-row + bulk)
+
+`sie_output_num_dims`, `sie_output_num_rows`, `sie_output_block`,
+`sie_output_type`, `sie_output_get_float64`, `sie_output_get_raw`,
+`sie_output_get_float64_range`, `sie_output_get_raw_range`.
+
+The `_range` variants copy `count` consecutive rows in one call — the
+recommended path for FFI consumers reading whole columns.
+
+### Stream
+
+`sie_stream_new`, `sie_stream_free`, `sie_stream_add_data`,
+`sie_stream_num_groups`, `sie_stream_group_num_blocks`,
+`sie_stream_group_num_bytes`, `sie_stream_is_group_closed`.
+
+### Histogram
+
+`sie_histogram_from_channel`, `sie_histogram_free`,
+`sie_histogram_num_dims`, `sie_histogram_total_size`,
+`sie_histogram_num_bins`, `sie_histogram_get_bin`,
+`sie_histogram_get_bounds`.
+
+### Writer (in-memory block composer + emit callback)
+
+| Symbol | Purpose |
+|--------|---------|
+| `sie_writer_new(callback, user, &w)` | Create writer; `callback=NULL` for dry run |
+| `sie_writer_free(w)` | Flush XML + index, free |
+| `sie_writer_write_block(w, group, data, size)` | Emit one framed block |
+| `sie_writer_xml_string(w, data, size)` | Append to XML buffer |
+| `sie_writer_xml_header(w)` | Emit standard SIE XML preamble |
+| `sie_writer_flush_xml(w)` / `_flush_index(w)` | Force flush pending buffers |
+| `sie_writer_next_id(w, id_type)` | Allocate next ID (`SIE_WRITER_ID_GROUP/TEST/CHANNEL/DECODER`) |
+| `sie_writer_total_size(w, addl_bytes, addl_blocks)` | Predicted file size |
+| `sie_writer_offset(w)` | Bytes already emitted |
+| `sie_writer_set_do_index(w, do_index)` | Toggle automatic group-1 indexing |
+
+Callback signature: `size_t (*sie_writer_fn)(void *user, const uint8_t *data, size_t size);`
+A short return is treated as `SIE_E_FILE_WRITE`.
+
+### FileStream (writer-side stream-to-file)
+
+`sie_file_stream_open`, `sie_file_stream_close`,
+`sie_file_stream_add_data`, `sie_file_stream_is_group_closed`,
+`sie_file_stream_num_groups`, `sie_file_stream_highest_group`.
+
+### Recover
+
+`sie_recover(path, mod, &json_ptr, &json_len)` returns a JSON summary;
+`sie_string_free(ptr, len)` releases the buffer.
+
+### PlotCrusher
+
+`sie_plot_crusher_new`, `sie_plot_crusher_free`,
+`sie_plot_crusher_work`, `sie_plot_crusher_finalize`,
+`sie_plot_crusher_get_output` (borrowed).
+
+### Sifter (subset extraction through a writer)
+
+`sie_sifter_new(writer, &s)`, `sie_sifter_free`,
+`sie_sifter_add_channel(s, file, ch, start_block, end_block)`,
+`sie_sifter_finish(s, file)`, `sie_sifter_total_entries`.
+The sifter borrows the writer; do not free the writer first.
